@@ -458,8 +458,7 @@ app.post('/api/admin/transfer', checkAdmin, async (req, res) => {
 (async () => {
   await mongoose.connect(MONGO_URI, {
     tls: true,
-    serverSelectionTimeoutMS: 3000,
-    autoSelectFamily: false // यह लाइन SSL एरर ठीक करने के लिए है
+    serverSelectionTimeoutMS: 3000
   })
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB connection error:', err));
