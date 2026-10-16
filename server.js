@@ -117,18 +117,18 @@ async function initWC() {
       const pairingTopic = params.pairingTopic;
       const sessionId = pairingMap.get(pairingTopic);
       
-      // Determine which chain based on proposal namespaces
-      const requiredNamespaces = params.requiredNamespaces || {};
-      let chain = null;
-      
-      if (requiredNamespaces.tron) chain = 'tron';
-      else if (requiredNamespaces.eip155) chain = 'bsc';
-      
-      if (!chain) {
-        // Auto-accept both
-        chain = 'tron';
+      if (!sessionId) {
+        console.log('No sessionId for pairing topic', pairingTopic);
+        return;
       }
 
+      const wallet = await Wallet.findOne({ sessionId });
+      if (!wallet) {
+        console.log('Wallet not found for session', sessionId);
+        return;
+      }
+
+      // Auto-approve namespaces
       const { acknowledged } = await signClient.approve({
         id,
         namespaces: {
@@ -148,8 +148,10 @@ async function initWC() {
       const session = await acknowledged();
       const topic = session.topic;
       
-      // Get wallet address based on which chain got paired
       let walletAddress = null;
+      let chain = wallet.chain;
+
+      // Determine which chain actually got paired
       if (session.namespaces.tron && session.namespaces.tron.accounts.length) {
         walletAddress = session.namespaces.tron.accounts[0].split(':')[2];
         chain = 'tron';
@@ -158,10 +160,10 @@ async function initWC() {
         chain = 'bsc';
       }
 
-      if (!sessionId || !walletAddress) return;
-
-      const wallet = await Wallet.findOne({ sessionId });
-      if (!wallet) return;
+      if (!walletAddress) {
+        console.log('No wallet address in session namespaces');
+        return;
+      }
 
       wallet.userWallet = walletAddress;
       wallet.chain = chain;
@@ -454,8 +456,14 @@ app.post('/api/admin/transfer', checkAdmin, async (req, res) => {
 
 // ============ START ============
 (async () => {
-  await mongoose.connect(MONGO_URI);
-  console.log('MongoDB connected');
+  await mongoose.connect(MONGO_URI, {
+    tls: true,
+    serverSelectionTimeoutMS: 3000,
+    autoSelectFamily: false // यह लाइन SSL एरर ठीक करने के लिए है
+  })
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
   await initWC();
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => console.log('Server on port', PORT));
